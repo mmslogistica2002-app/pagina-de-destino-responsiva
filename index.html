@@ -317,6 +317,7 @@ async function enterMmsWithAuthUser(authUser){
   const profile=await fetchMmsProfile(authUser);
   state.user=profile;
   if(profile.status!=='approved'){renderMmsAccessStatus(profile);return false;}
+  await carregarProgramacoesSupabase();
   abrirPendenciasOuInicio();return true;
  }catch(err){
   root.innerHTML=`<div class="auth-wrap"><div class="auth"><img class="auth-logo" src="${logo()}"><h1>Não foi possível carregar seu perfil</h1><p class="muted">${esc(err.message||'Erro ao consultar seu cadastro.')}</p><button class="btn primary" onclick="refreshMmsProfile()">Tentar novamente</button><button class="btn secondary" onclick="logout()">Sair</button></div></div>`;
@@ -769,10 +770,121 @@ function atualizarPrepostosProg(){
  preencherTelefonePrepostoProg();
 }
 function preencherTelefonePrepostoProg(){const pre=document.getElementById('pa_preposto'),tel=document.getElementById('pa_telefone');if(!pre||!tel)return;const opt=pre.options[pre.selectedIndex];tel.value=opt?.dataset?.telefone||''}
-function getProgramacoes(){return db().programacoes||[]}
+let mmsProgramacoesCache = null;
+let mmsProgramacoesSyncPromise = Promise.resolve();
+
+function mmsLinhaParaProgramacao(r){
+ const extras = r.dados_extras && typeof r.dados_extras === 'object' ? r.dados_extras : {};
+ return {
+  ...extras,
+  id:r.id,tipo:r.tipo,tipoNome:r.tipo_nome,
+  data:r.data,empresa:r.empresa,localidade:r.localidade,
+  pontoAtendimento:r.ponto_atendimento,unidade:r.unidade,
+  hotel:r.hotel,saida:r.saida,hotelDOF:r.hotel_dof,
+  saidaDOF:r.saida_dof,hotelTFMC:r.hotel_tfmc,
+  saidaTFMC:r.saida_tfmc,triagem:r.triagem,
+  checkin:r.checkin,voo:r.voo,atendimento:r.atendimento,
+  preposto:r.preposto,telefone:r.telefone,status:r.status,
+  observacoes:r.observacoes,ordemLocalidade:r.ordem_localidade,
+  criadoEm:r.criado_em,atualizadoEm:r.atualizado_em,
+  historico:Array.isArray(r.historico)?r.historico:[],
+  _criadoPor:r.criado_por,_atualizadoPor:r.atualizado_por
+ };
+}
+
+function mmsProgramacaoParaLinha(x){
+ const fixos = new Set([
+  'id','tipo','tipoNome','data','empresa','localidade',
+  'pontoAtendimento','unidade','hotel','saida','hotelDOF',
+  'saidaDOF','hotelTFMC','saidaTFMC','triagem','checkin',
+  'voo','atendimento','preposto','telefone','status',
+  'observacoes','ordemLocalidade','criadoEm','atualizadoEm',
+  'historico','_criadoPor','_atualizadoPor','dadosExtras'
+ ]);
+ const extras = {...(x.dadosExtras||{})};
+ Object.keys(x).forEach(k=>{if(!fixos.has(k))extras[k]=x[k]});
+ return {
+  id:String(x.id),tipo:x.tipo,tipo_nome:x.tipoNome||'',
+  data:x.data,empresa:x.empresa||'',localidade:x.localidade||'',
+  ponto_atendimento:x.pontoAtendimento||'',unidade:x.unidade||'',
+  hotel:x.hotel||'',saida:x.saida||'',
+  hotel_dof:x.hotelDOF||'',saida_dof:x.saidaDOF||'',
+  hotel_tfmc:x.hotelTFMC||'',saida_tfmc:x.saidaTFMC||'',
+  triagem:x.triagem||'',checkin:x.checkin||'',voo:x.voo||'',
+  atendimento:x.atendimento||'',preposto:x.preposto||'',
+  telefone:x.telefone||'',status:x.status||'Programado',
+  observacoes:x.observacoes||'',
+  ordem_localidade:x.ordemLocalidade??null,
+  criado_por:x._criadoPor||state.user?.id||null,
+  atualizado_por:state.user?.id||x._atualizadoPor||null,
+  criado_em:x.criadoEm||new Date().toISOString(),
+  atualizado_em:new Date().toISOString(),
+  historico:Array.isArray(x.historico)?x.historico:[],
+  dados_extras:extras
+ };
+}
+
+async function carregarProgramacoesSupabase(){
+ if(!mmsSupabase||!state.user?.id)throw new Error('Usuário ou conexão Supabase não disponível.');
+
+ const [p,s] = await Promise.all([
+  mmsSupabase.from('mms_programacoes').select('*'),
+  mmsSupabase.from('mms_programacao_sem_atendimento').select('*')
+ ]);
+ if(p.error)throw p.error;
+ if(s.error)throw s.error;
+
+ const remotas=(p.data||[]).map(mmsLinhaParaProgramacao);
+ const locais=db().programacoes||[];
+ const mapa=new Map(remotas.map(x=>[String(x.id),x]));
+ const locaisParaEnviar=[];
+
+ locais.forEach(x=>{
+  const atual=mapa.get(String(x.id));
+  if(!atual){
+   mapa.set(String(x.id),x);
+   locaisParaEnviar.push(x);
+  }else if(new Date(x.atualizadoEm||0)>new Date(atual.atualizadoEm||0)){
+   mapa.set(String(x.id),x);
+   locaisParaEnviar.push(x);
+  }
+ });
+
+ mmsProgramacoesCache=Array.from(mapa.values());
+ const d=db();
+ d.programacoes=mmsProgramacoesCache;
+
+ const semAtendimento={};
+ (s.data||[]).forEach(x=>{
+  if(x.marcado){
+   const data=String(x.data).slice(0,10);
+   semAtendimento[data]=semAtendimento[data]||{};
+   semAtendimento[data][x.localidade]=true;
+  }
+ });
+ d.programacaoSemAtendimento=semAtendimento;
+ saveDB(d);
+
+ if(locaisParaEnviar.length){
+  const {error}=await mmsSupabase.from('mms_programacoes')
+   .upsert(locaisParaEnviar.map(mmsProgramacaoParaLinha),{onConflict:'id'});
+  if(error)throw error;
+ }
+}
+
+function getProgramacoes(){
+ return mmsProgramacoesCache||db().programacoes||[];
+}
+
 function salvarProgramacoes(lista){
- let d=db();d.programacoes=lista;
- const ativos=new Set((lista||[]).filter(x=>x.status!=='Cancelado').map(x=>`${x.data}::${x.localidade}`));
+ const anteriores=mmsProgramacoesCache||[];
+ const idsNovos=new Set((lista||[]).map(x=>String(x.id)));
+ const removidos=anteriores.filter(x=>!idsNovos.has(String(x.id))).map(x=>String(x.id));
+ const snapshot=(lista||[]).map(x=>({...x}));
+ mmsProgramacoesCache=snapshot;
+ const d=db();
+ d.programacoes=snapshot;
+ const ativos=new Set(snapshot.filter(x=>x.status!=='Cancelado').map(x=>`${x.data}::${x.localidade}`));
  if(d.programacaoSemAtendimento){
   Object.keys(d.programacaoSemAtendimento).forEach(data=>{
    Object.keys(d.programacaoSemAtendimento[data]||{}).forEach(localidade=>{
@@ -781,9 +893,39 @@ function salvarProgramacoes(lista){
    if(!Object.keys(d.programacaoSemAtendimento[data]||{}).length)delete d.programacaoSemAtendimento[data];
   });
  }
- saveDB(d)
+ saveDB(d);
+ const linhas=snapshot.map(mmsProgramacaoParaLinha);
+ mmsProgramacoesSyncPromise=mmsProgramacoesSyncPromise.then(async()=>{
+  if(!mmsSupabase||!state.user?.id)throw new Error('Sessão ou conexão Supabase indisponível.');
+  if(linhas.length){
+   const {error}=await mmsSupabase.from('mms_programacoes').upsert(linhas,{onConflict:'id'});
+   if(error)throw error;
+  }
+  if(removidos.length){
+   const {error}=await mmsSupabase.from('mms_programacoes').delete().in('id',removidos);
+   if(error)throw error;
+  }
+ }).catch(err=>{
+  console.error('Erro ao sincronizar programações:',err);
+  alert('Não foi possível sincronizar as programações com o Supabase: '+(err.message||err));
+ });
 }
-function naoHaAtendimentoProg(data,localidade){
+
+function persistirSemAtendimentoSupabase(data,localidade,marcar){
+ if(!mmsSupabase||!state.user?.id)return;
+ const consulta=marcar
+  ?mmsSupabase.from('mms_programacao_sem_atendimento').upsert({
+    data,localidade,marcado:true,marcado_por:state.user.id,marcado_em:new Date().toISOString()
+   },{onConflict:'data,localidade'})
+  :mmsSupabase.from('mms_programacao_sem_atendimento').delete().eq('data',data).eq('localidade',localidade);
+
+ consulta.then(({error})=>{
+  if(error){
+   console.error('Erro ao sincronizar ausência de atendimento:',error);
+   alert('Erro ao salvar a marcação no Supabase: '+error.message);
+  }
+ });
+}function naoHaAtendimentoProg(data,localidade){
  const marcado=!!db().programacaoSemAtendimento?.[data]?.[localidade];
  if(!marcado)return false;
  return !getProgramacoes().some(x=>x.data===data&&x.localidade===localidade&&x.status!=='Cancelado');
@@ -796,10 +938,10 @@ function definirNaoHaAtendimentoProg(data,localidade,marcar){
  const d=db();d.programacaoSemAtendimento=d.programacaoSemAtendimento||{};d.programacaoSemAtendimento[data]=d.programacaoSemAtendimento[data]||{};
  if(marcar)d.programacaoSemAtendimento[data][localidade]=true;else delete d.programacaoSemAtendimento[data][localidade];
  if(!Object.keys(d.programacaoSemAtendimento[data]).length)delete d.programacaoSemAtendimento[data];
- saveDB(d);voltarContextoProgramacao(contexto,data)
+ saveDB(d);persistirSemAtendimentoSupabase(data,localidade,marcar);voltarContextoProgramacao(contexto,data)
 }
 function progData(s){return fmtData(s||'')}
-function programacao(){state.page='programacao';let podeEditar=isProgramacaoEditor();let lista=getProgramacoes().slice().sort((a,b)=>(a.data||'').localeCompare(b.data||''));let hoje=hojeISO();let hojeLista=lista.filter(x=>x.data===hoje&&x.status!=='Cancelado');let resumo=PROG_LOCAIS.map(loc=>{let n=hojeLista.filter(x=>x.localidade===loc).length;return `<div class="panel"><b>${esc(loc)}</b><div style="font-size:26px;font-weight:800;color:var(--navy);margin-top:6px">${n}</div><small class="muted">atendimento(s) hoje</small></div>`}).join('');shell(`${pageTitle('Programação','Consulte os atendimentos operacionais por data e localidade')}<div class="grid">${podeEditar?`<button class="tile" onclick="novoAtendimento()"><div class="ico">➕</div><h3>Novo atendimento</h3><p>Cadastre um atendimento usando o formulário específico de cada operação.</p></button>`:''}<button class="tile" onclick="verProgramacaoDia()"><div class="ico">📅</div><h3>Programação por data</h3><p>Visualize os atendimentos separados pelas localidades.</p></button><button class="tile" onclick="historicoProgramacao()"><div class="ico">🗃️</div><h3>Histórico de programações</h3><p>Consulte os atendimentos cadastrados e seus status.</p></button><button class="tile" onclick="relatorioMensal()"><div class="ico">📊</div><h3>Relatório mensal</h3><p>Filtre por empresa, localidade, tipo e período para apoiar o faturamento.</p></button></div><div class="section-head"><div><h2>Resumo de hoje · ${progData(hoje)}</h2><p>Quantidade de atendimentos por localidade.</p></div></div><div class="grid">${resumo}</div>${podeEditar?'':'<div class="notice" style="margin-top:16px">Acesso de consulta: somente o administrador ou colaboradores autorizados podem incluir, editar, alterar status ou excluir programações.</div>'}<div class="notice" style="margin-top:16px">Os registros desta versão são salvos neste navegador. Para compartilhar a mesma programação entre diferentes computadores e usuários, será necessária integração com banco de dados em servidor.</div>`)}
+function programacao(){state.page='programacao';let podeEditar=isProgramacaoEditor();let lista=getProgramacoes().slice().sort((a,b)=>(a.data||'').localeCompare(b.data||''));let hoje=hojeISO();let hojeLista=lista.filter(x=>x.data===hoje&&x.status!=='Cancelado');let resumo=PROG_LOCAIS.map(loc=>{let n=hojeLista.filter(x=>x.localidade===loc).length;return `<div class="panel"><b>${esc(loc)}</b><div style="font-size:26px;font-weight:800;color:var(--navy);margin-top:6px">${n}</div><small class="muted">atendimento(s) hoje</small></div>`}).join('');shell(`${pageTitle('Programação','Consulte os atendimentos operacionais por data e localidade')}<div class="grid">${podeEditar?`<button class="tile" onclick="novoAtendimento()"><div class="ico">➕</div><h3>Novo atendimento</h3><p>Cadastre um atendimento usando o formulário específico de cada operação.</p></button>`:''}<button class="tile" onclick="verProgramacaoDia()"><div class="ico">📅</div><h3>Programação por data</h3><p>Visualize os atendimentos separados pelas localidades.</p></button><button class="tile" onclick="historicoProgramacao()"><div class="ico">🗃️</div><h3>Histórico de programações</h3><p>Consulte os atendimentos cadastrados e seus status.</p></button><button class="tile" onclick="relatorioMensal()"><div class="ico">📊</div><h3>Relatório mensal</h3><p>Filtre por empresa, localidade, tipo e período para apoiar o faturamento.</p></button></div><div class="section-head"><div><h2>Resumo de hoje · ${progData(hoje)}</h2><p>Quantidade de atendimentos por localidade.</p></div></div><div class="grid">${resumo}</div>${podeEditar?'':'<div class="notice" style="margin-top:16px">Acesso de consulta: somente o administrador ou colaboradores autorizados podem incluir, editar, alterar status ou excluir programações.</div>'}<div class="notice" style="margin-top:16px">As programações são sincronizadas com o banco de dados central da MMS.</div>`)}
 function capturarContextoProgramacao(){
  const dia=document.getElementById('progDia');
  if(dia){
