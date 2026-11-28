@@ -445,11 +445,12 @@ async function shareReportPdf(){
    // com os estilos carregados no <head> da página.
    let st=document.getElementById('mmsReportPdfCss');if(!st){st=document.createElement('style');st.id='mmsReportPdfCss';document.head.appendChild(st)}
    st.textContent=reportStyles()+'.mms-report{margin:0!important;max-width:none!important;width:210mm!important;min-height:296mm!important;box-shadow:none!important;transform:none!important}';
-   let tmp=document.createElement('div');tmp.innerHTML=buildReportMarkup(state.report,logo());let reportEl=tmp.firstElementChild;
+   let tmp=document.createElement('div');tmp.style.cssText='position:fixed;left:-10000px;top:0;width:210mm;background:#fff;pointer-events:none';tmp.innerHTML=buildReportMarkup(state.report,logo());document.body.appendChild(tmp);let reportEl=tmp.firstElementChild;
    try{if(document.fonts&&document.fonts.ready)await document.fonts.ready}catch(_){}
    await Promise.all([...reportEl.querySelectorAll('img')].map(im=>new Promise(r=>{im.complete?r():(im.onload=im.onerror=r)})));
    window.scrollTo(0,0);
-   let blob=await html2pdf().set({margin:0,filename:fileName,image:{type:'jpeg',quality:.98},html2canvas:{scale:2,useCORS:true,backgroundColor:'#ffffff',logging:false,scrollX:0,scrollY:0},pagebreak:{mode:['css','legacy']},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}}).from(reportEl).outputPdf('blob');
+   let blob;try{blob=await html2pdf().set({margin:0,filename:fileName,image:{type:'jpeg',quality:.98},html2canvas:{scale:2,useCORS:true,backgroundColor:'#ffffff',logging:false,scrollX:0,scrollY:0},pagebreak:{mode:['css','legacy']},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}}).from(reportEl).outputPdf('blob')}finally{tmp.remove()}
+   if(!blob||blob.size<8000)throw new Error('PDF gerado vazio');
 
    let file=new File([blob],fileName,{type:'application/pdf'});
    if(navigator.share&&navigator.canShare&&navigator.canShare({files:[file]})){
