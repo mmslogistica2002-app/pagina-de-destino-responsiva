@@ -1187,7 +1187,7 @@ function notaRegrasMedicao(tipo){if(tipo==='constellation')return 'Mapeamento au
 function dataMesInicioMedicao(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`}
 function dataMesFimMedicao(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(new Date(d.getFullYear(),d.getMonth()+1,0).getDate()).padStart(2,'0')}`}
 function localidadesDisponiveisMedicao(){
- return ['Rio de Janeiro','Macaé','Vitória','Maricá','Farol de São Tomé','Cabo Frio'];
+ return ['Rio de Janeiro','Macaé','Vitória','Maricá','Farol de São Tomé','Cabo Frio','Campos'];
 }
 function atualizarTodasLocalidadesMedicao(){
  const caixas=[...document.querySelectorAll('[data-medicao-local]')],todas=document.getElementById('medicaoTodasLocais');
